@@ -1,5 +1,5 @@
 import { arrayify, BytesLike } from "./utils";
-import { shader, getShader } from "./shader";
+import { getShader } from "./shader";
 
 const debug = true;
 
@@ -76,9 +76,9 @@ class GPU {
   #device: GPUDevice | null = null;
   #computePipeline: GPUComputePipeline | null = null;
 
-  async init(useDebug = false, useFixedShader = false) {
+  async init() {
     this.#device = await getGPUDevice();
-    const shaderCode = await getShader(this.#device, useDebug, useFixedShader);
+    const shaderCode = getShader(this.#device);
     this.#computePipeline = this.#device.createComputePipeline({
       compute: {
         module: this.#device.createShaderModule({ code: shaderCode }),
@@ -110,15 +110,15 @@ let gpu: GPU;
  * Init GPU
  *
  */
-export async function gpu_init(useDebug = false) {
-  return gpu ? gpu : await new GPU().init(useDebug);
+export async function gpu_init() {
+  return gpu ? gpu : await new GPU().init();
 }
 
 /**
- * Force GPU re-initialization (useful for switching between debug and real shaders)
+ * Force GPU re-initialization
  */
-export async function gpu_reinit(useDebug = false, useFixedShader = false) {
-  gpu = await new GPU().init(useDebug, useFixedShader);
+export async function gpu_reinit() {
+  gpu = await new GPU().init();
   return gpu;
 }
 

@@ -9,9 +9,9 @@ async function playground() {
   console.log("=== WebGPU CREATE2 Mining Test Suite ===");
 
   try {
-    // Test GPU vs Viem CREATE2 validation with fixed shader
-    console.log("\n--- Testing GPU vs Viem CREATE2 Validation (Fixed Shader) ---");
-    await gpu_reinit(false, true); // Use fixed shader
+    // Test GPU vs Viem CREATE2 validation
+    console.log("\n--- Testing GPU vs Viem CREATE2 Validation ---");
+    await gpu_reinit();
     const gpuViemPassed = await testGPUvsViem();
 
     // Final CREATE2 validation test

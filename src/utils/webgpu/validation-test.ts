@@ -5,8 +5,8 @@ import { CREATE2_TEST_CASES, constructCreate2Input } from "./test-cases";
 export async function validateGPUImplementation() {
   console.log("🧪 === Final GPU CREATE2 Validation Test ===");
 
-  // Use the fixed shader
-  await gpu_reinit(false, true);
+  // Initialize GPU
+  await gpu_reinit();
 
   let allMatched = true;
 

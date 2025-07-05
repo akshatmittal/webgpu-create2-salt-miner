@@ -155,6 +155,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // Simplified shader exports - only the production shader
 export const shader = keccak256_wgsl;
 
-export function getShader(device: GPUDevice, useDebug = false, useFixedShader = false): string {
+export function getShader(device: GPUDevice): string {
   return keccak256_wgsl;
 }
