@@ -1,6 +1,6 @@
 import { getMiningShader } from "./mining-shader";
 
-const debug = false;
+const debug = true;
 
 async function getGPUDevice(): Promise<GPUDevice> {
   const adapter = await navigator.gpu.requestAdapter({
@@ -183,9 +183,9 @@ export class CREATE2Miner {
       const factoryAddressArray = hexToUint32Array(factoryAddress);
       const bytecodeHashArray = hexToUint32Array(bytecodeHash);
 
-      // Generate random bytes for salt diversity
-      const randomBytes = new Uint32Array(2);
-      crypto.getRandomValues(randomBytes);
+      // Generate random nonce for salt diversity
+      const randomNonce = new Uint32Array(1);
+      crypto.getRandomValues(randomNonce);
 
       // Create GPU buffers
       const userAddressBuffer = miningGpu.device.createBuffer({
@@ -212,13 +212,13 @@ export class CREATE2Miner {
       new Uint32Array(bytecodeHashBuffer.getMappedRange()).set(bytecodeHashArray);
       bytecodeHashBuffer.unmap();
 
-      const randomBytesBuffer = miningGpu.device.createBuffer({
+      const randomNonceBuffer = miningGpu.device.createBuffer({
         mappedAtCreation: true,
-        size: randomBytes.byteLength,
+        size: randomNonce.byteLength,
         usage: GPUBufferUsage.STORAGE,
       });
-      new Uint32Array(randomBytesBuffer.getMappedRange()).set(randomBytes);
-      randomBytesBuffer.unmap();
+      new Uint32Array(randomNonceBuffer.getMappedRange()).set(randomNonce);
+      randomNonceBuffer.unmap();
 
       const bestScoreBuffer = miningGpu.device.createBuffer({
         mappedAtCreation: true,
@@ -256,7 +256,7 @@ export class CREATE2Miner {
           { binding: 0, resource: { buffer: userAddressBuffer } },
           { binding: 1, resource: { buffer: factoryAddressBuffer } },
           { binding: 2, resource: { buffer: bytecodeHashBuffer } },
-          { binding: 3, resource: { buffer: randomBytesBuffer } },
+          { binding: 3, resource: { buffer: randomNonceBuffer } },
           { binding: 4, resource: { buffer: bestScoreBuffer } },
           { binding: 5, resource: { buffer: resultsBuffer } },
           { binding: 6, resource: { buffer: resultCountBuffer } },
@@ -332,10 +332,11 @@ export class CREATE2Miner {
           });
         }
 
-        // Update stats
-        this.stats.totalAttempts += workgroupSize;
+        // Update stats - each thread now processes 1024 nonces
+        const attemptsThisRound = workgroupSize * 1024;
+        this.stats.totalAttempts += attemptsThisRound;
         this.stats.bestScore = Math.max(this.stats.bestScore, bestScore);
-        this.stats.hashRate = (workgroupSize / (performance.now() - startTime)) * 1000;
+        this.stats.hashRate = (attemptsThisRound / (performance.now() - startTime)) * 1000;
 
         // Add new results
         this.stats.results.push(...newResults);
@@ -346,7 +347,7 @@ export class CREATE2Miner {
 
         if (debug) {
           console.log(
-            `Mining iteration: ${this.stats.totalAttempts} attempts, best score: ${this.stats.bestScore}, ${newResults.length} new results`,
+            `Mining iteration: ${this.stats.totalAttempts} attempts (${attemptsThisRound} this round), best score: ${this.stats.bestScore}, ${newResults.length} new results`,
           );
         }
 

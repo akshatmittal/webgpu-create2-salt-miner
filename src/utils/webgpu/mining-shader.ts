@@ -108,38 +108,64 @@ fn keccak256(message: ptr<function, array<u32, 34>>) -> array<u32, 8> {
     return result;
 }
 
-// Score an address based on leading zeros
+// Score an address based on leading zeros (last 20 bytes of hash)
 fn scoreAddress(hash: array<u32, 8>) -> u32 {
     var score: u32 = 0u;
     
-    // Check each word (4 bytes) for leading zeros
-    for (var word_idx: u32 = 0; word_idx < 8u; word_idx = word_idx + 1u) {
+    // Address is the last 20 bytes of the 32-byte hash (words 3-7)
+    // Process bytes in the same order as TypeScript addressFromUint32Array
+    for (var word_idx: u32 = 3u; word_idx < 8u; word_idx = word_idx + 1u) {
         let word = hash[word_idx];
         
-        // Check each byte in the word (little-endian)
-        for (var byte_idx: u32 = 0; byte_idx < 4u; byte_idx = byte_idx + 1u) {
-            let byte_val = (word >> (byte_idx * 8u)) & 0xFFu;
-            
-            if (byte_val == 0u) {
-                score = score + 2u; // 2 points for each zero byte (2 hex chars)
-            } else {
-                // Check nibbles for partial scores
-                let low_nibble = byte_val & 0xFu;
-                let high_nibble = (byte_val >> 4u) & 0xFu;
-                
-                if (high_nibble == 0u) {
-                    score = score + 1u; // 1 point for leading zero nibble
-                }
-                
-                // Stop at first non-zero nibble
-                if (high_nibble != 0u) {
-                    return score;
-                }
-                
-                if (low_nibble != 0u) {
-                    return score;
-                }
+        // Extract bytes in little-endian order (same as TypeScript function)
+        let byte0 = word & 0xFFu;
+        let byte1 = (word >> 8u) & 0xFFu;
+        let byte2 = (word >> 16u) & 0xFFu;
+        let byte3 = (word >> 24u) & 0xFFu;
+        
+        // Process bytes in order: byte0, byte1, byte2, byte3
+        // Check byte0
+        if (byte0 == 0u) {
+            score = score + 2u; // 2 points for zero byte
+        } else {
+            let high_nibble = (byte0 >> 4u) & 0xFu;
+            if (high_nibble == 0u) {
+                score = score + 1u; // 1 point for zero nibble
             }
+            return score; // Stop at first non-zero nibble
+        }
+        
+        // Check byte1
+        if (byte1 == 0u) {
+            score = score + 2u;
+        } else {
+            let high_nibble = (byte1 >> 4u) & 0xFu;
+            if (high_nibble == 0u) {
+                score = score + 1u;
+            }
+            return score;
+        }
+        
+        // Check byte2
+        if (byte2 == 0u) {
+            score = score + 2u;
+        } else {
+            let high_nibble = (byte2 >> 4u) & 0xFu;
+            if (high_nibble == 0u) {
+                score = score + 1u;
+            }
+            return score;
+        }
+        
+        // Check byte3
+        if (byte3 == 0u) {
+            score = score + 2u;
+        } else {
+            let high_nibble = (byte3 >> 4u) & 0xFu;
+            if (high_nibble == 0u) {
+                score = score + 1u;
+            }
+            return score;
         }
     }
     
@@ -157,7 +183,7 @@ var<storage, read> factory_address: array<u32, 5>; // 20 bytes = 5 words
 var<storage, read> bytecode_hash: array<u32, 8>; // 32 bytes = 8 words
 
 @group(0) @binding(3)
-var<storage, read> random_bytes: array<u32, 2>; // 8 bytes = 2 words
+var<storage, read> random_nonce: u32; // 4 bytes random from TypeScript
 
 @group(0) @binding(4)
 var<storage, read_write> best_score: atomic<u32>; // Current best score
@@ -171,11 +197,12 @@ var<storage, read_write> result_count: atomic<u32>; // Number of results found
 @group(0) @binding(7)
 var<storage, read> max_results: u32; // Maximum number of results to store
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let thread_id = global_id.x;
     
-    // Generate salt: user_address (20 bytes) + random_bytes (8 bytes) + nonce (4 bytes)
+    // Generate salt with 3-part uniqueness guarantee:
+    // user_address (20 bytes) + random_from_ts (4 bytes) + thread_id (4 bytes) + loop_counter (4 bytes)
     var salt: array<u32, 8>; // 32 bytes = 8 words
     
     // Copy user address (20 bytes = 5 words)
@@ -183,111 +210,121 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         salt[i] = user_address[i];
     }
     
-    // Copy random bytes (8 bytes = 2 words)
-    salt[5] = random_bytes[0];
-    salt[6] = random_bytes[1];
+    // Set random nonce from TypeScript (4 bytes)
+    salt[5] = random_nonce;
     
-    // Set nonce (4 bytes = 1 word) - use thread ID as nonce
-    salt[7] = thread_id;
+    // Set unique thread ID (4 bytes) 
+    salt[6] = thread_id;
     
-    // Construct CREATE2 input: 0xff + factory_address + salt + bytecode_hash
-    var create2_input: array<u32, 34>; // 136 bytes = 34 words (padded for Keccak)
+    // Loop through different counters per thread
+    for (var loop_counter: u32 = 0u; loop_counter < 1024u; loop_counter = loop_counter + 1u) {
+        // Set unique loop counter (4 bytes)
+        salt[7] = loop_counter;
     
-    // 0xff prefix (1 byte) + factory_address (20 bytes) + salt (32 bytes) + bytecode_hash (32 bytes) = 85 bytes
-    // Need to pad to 136 bytes for Keccak rate
-    
-    // Initialize with zeros
-    for (var i: u32 = 0; i < 34u; i = i + 1u) {
-        create2_input[i] = 0u;
-    }
-    
-    // Simplified approach: construct the CREATE2 input byte by byte
-    // CREATE2 input = 0xff + factory_address + salt + bytecode_hash (85 bytes total)
-    
-    // Copy data in correct order with proper byte alignment
-    // 0xff (1 byte) + factory_address (20 bytes) = 21 bytes
-    create2_input[0] = 0xFFu;
-    
-    // Copy factory address starting at word 0, byte 1
-    for (var i: u32 = 0; i < 5u; i = i + 1u) {
-        let word_idx = (i * 4u + 1u) / 4u;
-        let byte_offset = (i * 4u + 1u) % 4u;
+        // Construct CREATE2 input: 0xff + factory_address + salt + bytecode_hash
+        var create2_input: array<u32, 34>; // 136 bytes = 34 words (padded for Keccak)
         
-        // Extract bytes from factory_address[i] and place at correct position
-        let word_val = factory_address[i];
-        for (var j: u32 = 0; j < 4u; j = j + 1u) {
-            let byte_val = (word_val >> (j * 8u)) & 0xFFu;
-            let target_word = (i * 4u + j + 1u) / 4u;
-            let target_byte = (i * 4u + j + 1u) % 4u;
-            create2_input[target_word] |= byte_val << (target_byte * 8u);
-        }
-    }
-    
-    // Copy salt starting at byte 21
-    for (var i: u32 = 0; i < 8u; i = i + 1u) {
-        let word_val = salt[i];
-        for (var j: u32 = 0; j < 4u; j = j + 1u) {
-            let byte_val = (word_val >> (j * 8u)) & 0xFFu;
-            let target_word = (i * 4u + j + 21u) / 4u;
-            let target_byte = (i * 4u + j + 21u) % 4u;
-            create2_input[target_word] |= byte_val << (target_byte * 8u);
-        }
-    }
-    
-    // Copy bytecode hash starting at byte 53
-    for (var i: u32 = 0; i < 8u; i = i + 1u) {
-        let word_val = bytecode_hash[i];
-        for (var j: u32 = 0; j < 4u; j = j + 1u) {
-            let byte_val = (word_val >> (j * 8u)) & 0xFFu;
-            let target_word = (i * 4u + j + 53u) / 4u;
-            let target_byte = (i * 4u + j + 53u) % 4u;
-            create2_input[target_word] |= byte_val << (target_byte * 8u);
-        }
-    }
-    
-    // Apply Keccak padding at byte 85
-    let pad_word = 85u / 4u; // Word 21
-    let pad_byte = 85u % 4u; // Byte 1
-    create2_input[pad_word] |= 0x01u << (pad_byte * 8u);
-    
-    // Set final padding bit at last byte (byte 135 = word 33, byte 3)
-    create2_input[33] |= 0x80u << (3u * 8u);
-    
-    // Calculate CREATE2 address
-    let address_hash = keccak256(&create2_input);
-    
-    // Score the address
-    let score = scoreAddress(address_hash);
-    
-    // Only store results that beat the current best score
-    let current_best = atomicLoad(&best_score);
-    if (score > current_best) {
-        // Atomically check and update best score
-        let old_best = atomicMax(&best_score, score);
+        // 0xff prefix (1 byte) + factory_address (20 bytes) + salt (32 bytes) + bytecode_hash (32 bytes) = 85 bytes
+        // Need to pad to 136 bytes for Keccak rate
         
-        if (score > old_best) {
-            // Store this result
-            let result_index = atomicAdd(&result_count, 1u);
+        // Initialize with zeros
+        // for (var i: u32 = 0; i < 34u; i = i + 1u) {
+        //     create2_input[i] = 0u;
+        // }
+        
+        // Simplified approach: construct the CREATE2 input byte by byte
+        // CREATE2 input = 0xff + factory_address + salt + bytecode_hash (85 bytes total)
+        
+        // Copy data in correct order with proper byte alignment
+        // 0xff (1 byte) + factory_address (20 bytes) = 21 bytes
+        create2_input[0] = 0xFFu;
+        
+        // Copy factory address starting at word 0, byte 1
+        for (var i: u32 = 0; i < 5u; i = i + 1u) {
+            let word_idx = (i * 4u + 1u) / 4u;
+            let byte_offset = (i * 4u + 1u) % 4u;
             
-            if (result_index < max_results) {
-                let base_idx = result_index * 14u; // 1 score + 8 salt words + 5 address words
+            // Extract bytes from factory_address[i] and place at correct position
+            let word_val = factory_address[i];
+            for (var j: u32 = 0; j < 4u; j = j + 1u) {
+                let byte_val = (word_val >> (j * 8u)) & 0xFFu;
+                let target_word = (i * 4u + j + 1u) / 4u;
+                let target_byte = (i * 4u + j + 1u) % 4u;
+                create2_input[target_word] |= byte_val << (target_byte * 8u);
+            }
+        }
+        
+        // Copy salt starting at byte 21
+        for (var i: u32 = 0; i < 8u; i = i + 1u) {
+            let word_val = salt[i];
+            for (var j: u32 = 0; j < 4u; j = j + 1u) {
+                let byte_val = (word_val >> (j * 8u)) & 0xFFu;
+                let target_word = (i * 4u + j + 21u) / 4u;
+                let target_byte = (i * 4u + j + 21u) % 4u;
+                create2_input[target_word] |= byte_val << (target_byte * 8u);
+            }
+        }
+        
+        // Copy bytecode hash starting at byte 53
+        for (var i: u32 = 0; i < 8u; i = i + 1u) {
+            let word_val = bytecode_hash[i];
+            for (var j: u32 = 0; j < 4u; j = j + 1u) {
+                let byte_val = (word_val >> (j * 8u)) & 0xFFu;
+                let target_word = (i * 4u + j + 53u) / 4u;
+                let target_byte = (i * 4u + j + 53u) % 4u;
+                create2_input[target_word] |= byte_val << (target_byte * 8u);
+            }
+        }
+        
+        // Apply Keccak padding at byte 85
+        let pad_word = 85u / 4u; // Word 21
+        let pad_byte = 85u % 4u; // Byte 1
+        create2_input[pad_word] |= 0x01u << (pad_byte * 8u);
+        
+        // Set final padding bit at last byte (byte 135 = word 33, byte 3)
+        create2_input[33] |= 0x80u << (3u * 8u);
+        
+        // Calculate CREATE2 address
+        let address_hash = keccak256(&create2_input);
+        
+        // Score the address
+        let score = scoreAddress(address_hash);
+        
+        // Only store results that actually improve the best score
+        if (score > 0u) {
+            // First check if it's worth trying (avoid unnecessary atomic operations)
+            let current_best = atomicLoad(&best_score);
+            if (score > current_best) {
+                // Try to atomically update the best score
+                let old_best = atomicMax(&best_score, score);
                 
-                results[base_idx] = score;
-                
-                // Store salt
-                for (var i: u32 = 0; i < 8u; i = i + 1u) {
-                    results[base_idx + 1u + i] = salt[i];
-                }
-                
-                // Store address (last 20 bytes of hash)
-                // Extract the last 20 bytes (5 words) from the 32-byte hash
-                for (var i: u32 = 0; i < 5u; i = i + 1u) {
-                    results[base_idx + 9u + i] = address_hash[i + 3u]; // Skip first 3 words (12 bytes)
+                // Only store if WE were the thread that actually improved the score
+                // (i.e., the old value was actually less than our score)
+                if (score > old_best) {
+                    let result_index = atomicAdd(&result_count, 1u);
+                    
+                    if (result_index < max_results) {
+                        let base_idx = result_index * 14u; // 1 score + 8 salt words + 5 address words
+                        
+                        results[base_idx] = score;
+                        
+                        // Store salt
+                        for (var i: u32 = 0; i < 8u; i = i + 1u) {
+                            results[base_idx + 1u + i] = salt[i];
+                        }
+                        
+                        // Store address (last 20 bytes of hash)
+                        // Extract the last 20 bytes (5 words) from the 32-byte hash
+                        for (var i: u32 = 0; i < 5u; i = i + 1u) {
+                            results[base_idx + 9u + i] = address_hash[i + 3u]; // Skip first 3 words (12 bytes)
+                        }
+                    }
                 }
             }
         }
-    }
-}`;
+    } // End of nonce loop
+} // End of main function
+`;
 
 export const miningShader = create2_mining_wgsl;
 
