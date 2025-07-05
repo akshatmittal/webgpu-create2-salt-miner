@@ -6,9 +6,9 @@ import { testMiningSystem } from "@/utils/webgpu/mining-test";
 
 export function Create2Miner() {
   const [miningParams, setMiningParams] = useState<MiningParams>({
-    userAddress: "",
-    factoryAddress: "",
-    bytecodeHash: "",
+    userAddress: "0x0000000000000000000000000000000000000000",
+    factoryAddress: "0x0000000000000000000000000000000000000000",
+    bytecodeHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
     targetZeros: 2,
     maxResults: 10,
     workgroupSize: 4096,
@@ -20,6 +20,8 @@ export function Create2Miner() {
     bestScore: 0,
     results: [],
     isRunning: false,
+    currentThreshold: 0,
+    iterationsCompleted: 0,
   });
 
   const [error, setError] = useState<string>("");
@@ -112,8 +114,8 @@ export function Create2Miner() {
     <div className="mx-auto max-w-6xl space-y-6 p-6">
       <div className="rounded-lg bg-white p-6 shadow-lg">
         <h1 className="mb-6 flex items-center gap-2 text-3xl font-bold text-gray-800">
-          ⚡ CREATE2 Salt Miner
-          <span className="rounded bg-blue-100 px-2 py-1 text-sm text-blue-800">GPU Powered</span>
+          ⚡ WebGPU Create2 Salt Miner
+          <span className="rounded bg-blue-100 px-2 py-1 text-sm text-blue-800">GPU Accelerated</span>
         </h1>
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -226,7 +228,7 @@ export function Create2Miner() {
               </button>
             </div>
 
-            <div className="mt-4">
+            {/* <div className="mt-4">
               <button
                 onClick={runSystemTest}
                 disabled={isTestingSystem || stats.isRunning}
@@ -238,7 +240,7 @@ export function Create2Miner() {
               >
                 {isTestingSystem ? "Running Test..." : "🧪 Test Mining System"}
               </button>
-            </div>
+            </div> */}
 
             {error && <div className="rounded-md border border-red-400 bg-red-100 p-4 text-red-700">{error}</div>}
           </div>

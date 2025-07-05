@@ -1,36 +1,14 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+#### WebGPU Create2 Salt Miner
 
-## Getting Started
+> [!WARNING]
+> This is alpha software. I cooked this up in a matter of hours and the WebGPU Compte Shader is nowhere near optimized.
 
-First, run the development server:
+Proof of concept for a WebGPU Create2 Salt Miner. Finding salts for efficient CREATE2 contract deployment is extremely common but often requires a fair bit of compute, which often leads to GPU based solutions. Most popular implementations are binaries and are written in Rust. I wanted to create a web based solution for the problem and WebGPU came to mind. The spec itself is not finalized and is currently only supported in Chrome and it's derivatives.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+The WebGPU Compute Shader is a port of the OpenCL Keccak F1600 implementation, but not optimized to the same level. The WebGPU implementation is currently ~20x slower than the OpenCL implementation, and because the difference is that high, I don't think it is possible to optimize it to the same level.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+That said, it services as a great proof of concept and if someone wants to take a stab at optimizing it, I'd be happy to integrate it.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Code Quality
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Near 90% of the frontend code is written by Claude, didn't want to bother with a UI if the compute shader wasn't going to be comparable at all. Doesn't implement Web Workers either, even though that would give a boost to the usability and overall performance.
