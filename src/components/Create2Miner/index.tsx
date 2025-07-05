@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { CREATE2Miner, MiningParams, MiningStats } from "@/utils/webgpu/mining";
 import { testMiningSystem } from "@/utils/webgpu/mining-test";
+import Link from "next/link";
 
 export function Create2Miner() {
   const [miningParams, setMiningParams] = useState<MiningParams>({
@@ -74,24 +75,6 @@ export function Create2Miner() {
     }
   };
 
-  const runSystemTest = async () => {
-    setIsTestingSystem(true);
-    setError("");
-
-    try {
-      const testPassed = await testMiningSystem();
-      if (testPassed) {
-        setError("✅ System test passed! Mining system is working correctly.");
-      } else {
-        setError("❌ System test failed. Check console for details.");
-      }
-    } catch (err: any) {
-      setError(`❌ System test error: ${err.message}`);
-    } finally {
-      setIsTestingSystem(false);
-    }
-  };
-
   const formatHashRate = (rate: number) => {
     if (rate > 1000000) return `${(rate / 1000000).toFixed(1)}M H/s`;
     if (rate > 1000) return `${(rate / 1000).toFixed(1)}K H/s`;
@@ -99,7 +82,7 @@ export function Create2Miner() {
   };
 
   const formatAddress = (addr: string) => {
-    return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+    return addr;
   };
 
   const getScoreColor = (score: number) => {
@@ -125,7 +108,7 @@ export function Create2Miner() {
 
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
-                User Address (20 bytes will be first part of salt)
+                User Address (will be first 20 bytes of salt)
               </label>
               <input
                 type="text"
@@ -149,7 +132,7 @@ export function Create2Miner() {
 
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
-                Bytecode Hash (keccak256 of contract bytecode)
+                Bytecode Hash (keccak256 of contract initcode)
               </label>
               <input
                 type="text"
@@ -162,7 +145,7 @@ export function Create2Miner() {
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700">Target Leading Zeros</label>
+                <label className="mb-2 block text-sm font-medium text-gray-700">Target Leading Zero Bytes</label>
                 <input
                   type="number"
                   min="1"
@@ -263,7 +246,7 @@ export function Create2Miner() {
               <div className="rounded-lg bg-gray-50 p-4">
                 <div className="text-sm text-gray-600">Best Score</div>
                 <div className={`text-2xl font-bold ${getScoreColor(stats.bestScore)}`}>
-                  {stats.bestScore} ({Math.floor(stats.bestScore / 2)} zeros)
+                  {stats.bestScore} ({Math.floor(stats.bestScore / 2)} zero bytes)
                 </div>
               </div>
 
@@ -273,14 +256,25 @@ export function Create2Miner() {
               </div>
             </div>
 
-            <div className="rounded-lg bg-green-50 p-4">
-              <h3 className="mb-2 font-semibold text-green-800">How it works:</h3>
-              <ul className="space-y-1 text-sm text-green-700">
-                <li>• Salt structure: UserAddress(20) + Random(8) + Nonce(4)</li>
-                <li>• GPU threads work in parallel with different nonces</li>
-                <li>• Only addresses with more leading zeros are returned</li>
-                <li>• Mining continues until target is reached</li>
-              </ul>
+            <div className="flex gap-2 rounded-lg bg-green-50 p-4">
+              <Link
+                href="https://github.com/akshatmittal/webgpu-create2-salt-miner"
+                target="_blank"
+              >
+                <img
+                  className="rounded-md"
+                  src="https://img.shields.io/badge/GitHub-181717.svg?logo=GitHub&logoColor=white"
+                />
+              </Link>
+              <Link
+                href="https://x.com/iakshatmittal"
+                target="_blank"
+              >
+                <img
+                  className="rounded-md"
+                  src="https://img.shields.io/badge/iakshatmittal-000000.svg?logo=X&logoColor=white"
+                />
+              </Link>
             </div>
           </div>
         </div>
@@ -297,7 +291,6 @@ export function Create2Miner() {
                 <tr className="bg-gray-50">
                   <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Rank</th>
                   <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Score</th>
-                  <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Zeros</th>
                   <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Address</th>
                   <th className="px-4 py-2 text-left text-sm font-medium text-gray-700">Salt</th>
                 </tr>
@@ -310,7 +303,6 @@ export function Create2Miner() {
                   >
                     <td className="px-4 py-2 text-sm text-gray-600">#{index + 1}</td>
                     <td className={`px-4 py-2 text-sm font-medium ${getScoreColor(result.score)}`}>{result.score}</td>
-                    <td className="px-4 py-2 font-mono text-sm text-gray-800">{result.zeros}</td>
                     <td className="px-4 py-2 font-mono text-sm text-gray-800">
                       <span title={result.address}>{formatAddress(result.address)}</span>
                     </td>
