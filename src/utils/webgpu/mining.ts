@@ -1,6 +1,7 @@
 import { getMiningShader } from "./mining-shader";
+import { getContractAddress } from "viem";
 
-const debug = true;
+const debug = false;
 
 async function getGPUDevice(): Promise<GPUDevice> {
   const adapter = await navigator.gpu.requestAdapter({
@@ -80,6 +81,18 @@ function addressFromUint32Array(arr: Uint32Array): string {
   return hexStr.slice(0, 42); // Take only first 42 chars (0x + 40 hex chars = 20 bytes)
 }
 
+// Calculate CREATE2 address from salt and parameters using viem
+function calculateCreate2Address(factoryAddress: string, salt: string, bytecodeHash: string): string {
+  // Use viem's getContractAddress for proper CREATE2 address calculation
+  // For CREATE2, we need to use bytecodeHash parameter, not bytecode
+  return getContractAddress({
+    opcode: "CREATE2",
+    from: factoryAddress as `0x${string}`,
+    salt: salt as `0x${string}`,
+    bytecodeHash: bytecodeHash as `0x${string}`,
+  });
+}
+
 export interface MiningParams {
   userAddress: string;
   factoryAddress: string;
@@ -87,6 +100,7 @@ export interface MiningParams {
   targetZeros: number;
   maxResults?: number;
   workgroupSize?: number;
+  minScoreThreshold?: number; // New parameter for optimization
 }
 
 export interface MiningResult {
@@ -157,6 +171,13 @@ export class CREATE2Miner {
     if (!miningGpu) {
       miningGpu = await new MiningGPU().init();
     }
+
+    if (debug) {
+      console.log("MiningGPU initialized successfully");
+      console.log(`Device: ${miningGpu.device.label || "WebGPU Device"}`);
+      console.log(`Compute pipeline: ${miningGpu.computePipeline ? "Ready" : "Not ready"}`);
+    }
+
     return this;
   }
 
@@ -170,12 +191,24 @@ export class CREATE2Miner {
   async mine(params: MiningParams): Promise<MiningResult[]> {
     await this.init();
 
-    const { userAddress, factoryAddress, bytecodeHash, targetZeros, maxResults = 10, workgroupSize = 1024 } = params;
+    const {
+      userAddress,
+      factoryAddress,
+      bytecodeHash,
+      targetZeros,
+      maxResults = 10,
+      workgroupSize = 1024,
+      minScoreThreshold = 0, // Changed from 1 to 0 to capture all results
+    } = params;
 
     this.isRunning = true;
     this.stats.bestScore = 0;
     this.stats.results = [];
     this.updateStats();
+
+    if (debug) {
+      console.log(`Starting mining with minScoreThreshold: ${minScoreThreshold}`);
+    }
 
     try {
       // Convert addresses to Uint32Arrays
@@ -183,9 +216,22 @@ export class CREATE2Miner {
       const factoryAddressArray = hexToUint32Array(factoryAddress);
       const bytecodeHashArray = hexToUint32Array(bytecodeHash);
 
+      if (debug) {
+        console.log("Input validation:");
+        console.log(`  userAddress: ${userAddress} -> ${userAddressArray.length} words`);
+        console.log(`  factoryAddress: ${factoryAddress} -> ${factoryAddressArray.length} words`);
+        console.log(`  bytecodeHash: ${bytecodeHash} -> ${bytecodeHashArray.length} words`);
+        console.log(`  workgroupSize: ${workgroupSize}`);
+        console.log(`  maxResults: ${maxResults}`);
+      }
+
       // Generate random nonce for salt diversity
       const randomNonce = new Uint32Array(1);
       crypto.getRandomValues(randomNonce);
+
+      if (debug) {
+        console.log(`Generated random nonce: ${randomNonce[0]}`);
+      }
 
       // Create GPU buffers
       const userAddressBuffer = miningGpu.device.createBuffer({
@@ -228,11 +274,16 @@ export class CREATE2Miner {
       new Uint32Array(bestScoreBuffer.getMappedRange()).set([0]);
       bestScoreBuffer.unmap();
 
-      const resultsBufferSize = maxResults * 14 * 4; // 14 words per result
+      // Optimized results buffer size: 9 words per result (1 score + 8 salt words)
+      const resultsBufferSize = maxResults * 9 * 4;
       const resultsBuffer = miningGpu.device.createBuffer({
+        mappedAtCreation: true,
         size: resultsBufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
       });
+      // Initialize with zeros
+      new Uint32Array(resultsBuffer.getMappedRange()).fill(0);
+      resultsBuffer.unmap();
 
       const resultCountBuffer = miningGpu.device.createBuffer({
         mappedAtCreation: true,
@@ -241,14 +292,6 @@ export class CREATE2Miner {
       });
       new Uint32Array(resultCountBuffer.getMappedRange()).set([0]);
       resultCountBuffer.unmap();
-
-      const maxResultsBuffer = miningGpu.device.createBuffer({
-        mappedAtCreation: true,
-        size: 4,
-        usage: GPUBufferUsage.STORAGE,
-      });
-      new Uint32Array(maxResultsBuffer.getMappedRange()).set([maxResults]);
-      maxResultsBuffer.unmap();
 
       const bindGroup = miningGpu.device.createBindGroup({
         layout: miningGpu.computePipeline.getBindGroupLayout(0),
@@ -260,21 +303,23 @@ export class CREATE2Miner {
           { binding: 4, resource: { buffer: bestScoreBuffer } },
           { binding: 5, resource: { buffer: resultsBuffer } },
           { binding: 6, resource: { buffer: resultCountBuffer } },
-          { binding: 7, resource: { buffer: maxResultsBuffer } },
         ],
       });
 
       // Mine until we reach the target or user stops
       while (this.isRunning && this.stats.bestScore < targetZeros * 2) {
         const startTime = performance.now();
+        const numWorkgroups = Math.ceil(workgroupSize / 256); // 256 threads per workgroup
+
+        if (debug) {
+          console.log(`Dispatching compute shader with ${numWorkgroups} workgroups, ${workgroupSize} total threads`);
+        }
 
         // Dispatch compute shader
         const commandEncoder = miningGpu.device.createCommandEncoder();
         const passEncoder = commandEncoder.beginComputePass();
         passEncoder.setPipeline(miningGpu.computePipeline);
         passEncoder.setBindGroup(0, bindGroup);
-
-        const numWorkgroups = Math.ceil(workgroupSize / 64); // 64 threads per workgroup
         passEncoder.dispatchWorkgroups(numWorkgroups);
         passEncoder.end();
 
@@ -300,6 +345,10 @@ export class CREATE2Miner {
         const commands = commandEncoder.finish();
         miningGpu.device.queue.submit([commands]);
 
+        if (debug) {
+          console.log("Commands submitted, waiting for GPU...");
+        }
+
         await readBestScoreBuffer.mapAsync(GPUMapMode.READ);
         await readResultCountBuffer.mapAsync(GPUMapMode.READ);
         await readResultsBuffer.mapAsync(GPUMapMode.READ);
@@ -308,31 +357,50 @@ export class CREATE2Miner {
         const resultCount = new Uint32Array(readResultCountBuffer.getMappedRange())[0];
         const resultsData = new Uint32Array(readResultsBuffer.getMappedRange());
 
-        // Process results
+        if (debug) {
+          console.log(`GPU returned: bestScore=${bestScore}, resultCount=${resultCount}`);
+          if (resultCount > 0) {
+            console.log(`First result data: [${Array.from(resultsData.slice(0, 9)).join(", ")}]`);
+          }
+        }
+
+        // Process results - now only 9 words per result
         const newResults: MiningResult[] = [];
         for (let i = 0; i < resultCount; i++) {
-          const baseIdx = i * 14;
+          const baseIdx = i * 9; // 1 score + 8 salt words
           const score = resultsData[baseIdx];
+
+          if (debug && i === 0) {
+            console.log(`Processing result ${i}: score=${score}, baseIdx=${baseIdx}`);
+          }
 
           const saltArray = new Uint32Array(8);
           for (let j = 0; j < 8; j++) {
             saltArray[j] = resultsData[baseIdx + 1 + j];
           }
 
-          const addressArray = new Uint32Array(5);
-          for (let j = 0; j < 5; j++) {
-            addressArray[j] = resultsData[baseIdx + 9 + j];
+          const salt = uint32ArrayToHex(saltArray);
+
+          if (debug && i === 0) {
+            console.log(`Salt: ${salt}`);
+          }
+
+          // Calculate address on frontend using salt
+          const address = calculateCreate2Address(factoryAddress, salt, bytecodeHash);
+
+          if (debug && i === 0) {
+            console.log(`Calculated address: ${address}`);
           }
 
           newResults.push({
             score,
-            salt: uint32ArrayToHex(saltArray),
-            address: addressFromUint32Array(addressArray),
+            salt,
+            address,
             zeros: Math.floor(score / 2),
           });
         }
 
-        // Update stats - each thread now processes 1024 nonces
+        // Update stats - all threads now process 1024 nonces each
         const attemptsThisRound = workgroupSize * 1024;
         this.stats.totalAttempts += attemptsThisRound;
         this.stats.bestScore = Math.max(this.stats.bestScore, bestScore);
@@ -347,13 +415,19 @@ export class CREATE2Miner {
 
         if (debug) {
           console.log(
-            `Mining iteration: ${this.stats.totalAttempts} attempts (${attemptsThisRound} this round), best score: ${this.stats.bestScore}, ${newResults.length} new results`,
+            `Mining iteration: ${this.stats.totalAttempts} attempts (${attemptsThisRound} this round), best score: ${this.stats.bestScore}, ${newResults.length} new results, hashRate: ${this.stats.hashRate.toFixed(0)} H/s`,
           );
         }
 
         readBestScoreBuffer.unmap();
         readResultCountBuffer.unmap();
         readResultsBuffer.unmap();
+
+        // Break after first iteration for debugging
+        // if (debug && this.stats.totalAttempts >= attemptsThisRound) {
+        //   console.log("Breaking after first iteration for debugging");
+        //   break;
+        // }
       }
 
       return this.stats.results;
