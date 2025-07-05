@@ -1,7 +1,7 @@
 import { arrayify, BytesLike } from "./utils";
 import { getShader } from "./shader";
 
-const debug = true;
+const debug = false;
 
 async function getGPUDevice(): Promise<GPUDevice> {
   const adapter = await navigator.gpu.requestAdapter({
@@ -139,12 +139,7 @@ export async function keccak256_gpu_batch(messages: Uint8Array[]) {
   const paddedMessages = messages.map((msg) => padMessageForKeccak(msg));
   const messageSizes = getMessageSizes(messages[0]);
 
-  console.log("messageSizes", messageSizes);
-  console.log("Original message length:", messages[0].length);
-  console.log("Padded message length:", paddedMessages[0].length);
-
   const messageArray = new Uint32Array(messageSizes[1] * messages.length);
-  console.log("messageArray", messageArray);
 
   let offset = 0;
   for (const paddedMessage of paddedMessages) {
