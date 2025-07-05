@@ -1,7 +1,7 @@
 import { getMiningShader } from "./mining-shader";
 import { getContractAddress } from "viem";
 
-const debug = false;
+const debug = true;
 
 async function getGPUDevice(): Promise<GPUDevice> {
   const adapter = await navigator.gpu.requestAdapter({
@@ -10,7 +10,11 @@ async function getGPUDevice(): Promise<GPUDevice> {
   if (!adapter) {
     throw "No adapter";
   } else {
-    return await adapter.requestDevice();
+    return await adapter.requestDevice({
+      requiredLimits: {
+        maxStorageBuffersPerShaderStage: 10,
+      },
+    });
   }
 }
 
@@ -116,6 +120,8 @@ export interface MiningStats {
   bestScore: number;
   results: MiningResult[];
   isRunning: boolean;
+  currentThreshold: number; // Track current threshold
+  iterationsCompleted: number; // Track completed iterations
 }
 
 class MiningGPU {
@@ -160,6 +166,8 @@ export class CREATE2Miner {
     bestScore: 0,
     results: [],
     isRunning: false,
+    currentThreshold: 0,
+    iterationsCompleted: 0,
   };
   private onStatsUpdate?: (stats: MiningStats) => void;
 
@@ -198,16 +206,18 @@ export class CREATE2Miner {
       targetZeros,
       maxResults = 10,
       workgroupSize = 1024,
-      minScoreThreshold = 0, // Changed from 1 to 0 to capture all results
+      minScoreThreshold = 0, // Start with 0 threshold to collect all results initially
     } = params;
 
     this.isRunning = true;
     this.stats.bestScore = 0;
     this.stats.results = [];
+    this.stats.currentThreshold = minScoreThreshold;
+    this.stats.iterationsCompleted = 0;
     this.updateStats();
 
     if (debug) {
-      console.log(`Starting mining with minScoreThreshold: ${minScoreThreshold}`);
+      console.log(`Starting mining with initial threshold: ${minScoreThreshold}`);
     }
 
     try {
@@ -266,17 +276,10 @@ export class CREATE2Miner {
       new Uint32Array(randomNonceBuffer.getMappedRange()).set(randomNonce);
       randomNonceBuffer.unmap();
 
-      const bestScoreBuffer = miningGpu.device.createBuffer({
-        mappedAtCreation: true,
-        size: 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-      });
-      new Uint32Array(bestScoreBuffer.getMappedRange()).set([0]);
-      bestScoreBuffer.unmap();
-
-      // Optimized results buffer size: 9 words per result (1 score + 8 salt words)
-      const resultsBufferSize = maxResults * 9 * 4;
-      const resultsBuffer = miningGpu.device.createBuffer({
+      // Results buffer size: 9 words per result (1 score + 8 salt words)
+      // Increased to 20 slots to match shader changes
+      const resultsBufferSize = Math.max(maxResults, 20) * 9 * 4;
+      let resultsBuffer = miningGpu.device.createBuffer({
         mappedAtCreation: true,
         size: resultsBufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -285,7 +288,7 @@ export class CREATE2Miner {
       new Uint32Array(resultsBuffer.getMappedRange()).fill(0);
       resultsBuffer.unmap();
 
-      const resultCountBuffer = miningGpu.device.createBuffer({
+      let resultCountBuffer = miningGpu.device.createBuffer({
         mappedAtCreation: true,
         size: 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -293,42 +296,66 @@ export class CREATE2Miner {
       new Uint32Array(resultCountBuffer.getMappedRange()).set([0]);
       resultCountBuffer.unmap();
 
-      const bindGroup = miningGpu.device.createBindGroup({
-        layout: miningGpu.computePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: userAddressBuffer } },
-          { binding: 1, resource: { buffer: factoryAddressBuffer } },
-          { binding: 2, resource: { buffer: bytecodeHashBuffer } },
-          { binding: 3, resource: { buffer: randomNonceBuffer } },
-          { binding: 4, resource: { buffer: bestScoreBuffer } },
-          { binding: 5, resource: { buffer: resultsBuffer } },
-          { binding: 6, resource: { buffer: resultCountBuffer } },
-        ],
+      let foundBetterBuffer = miningGpu.device.createBuffer({
+        mappedAtCreation: true,
+        size: 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
       });
+      new Uint32Array(foundBetterBuffer.getMappedRange()).set([0]);
+      foundBetterBuffer.unmap();
+
+      let currentThreshold = minScoreThreshold;
+      let totalIterations = 0;
 
       // Mine until we reach the target or user stops
       while (this.isRunning && this.stats.bestScore < targetZeros * 2) {
         const startTime = performance.now();
-        const numWorkgroups = Math.ceil(workgroupSize / 256); // 256 threads per workgroup
+        const numWorkgroups = Math.ceil(workgroupSize / 8); // 8 threads per workgroup (matching shader)
 
         if (debug) {
-          console.log(`Dispatching compute shader with ${numWorkgroups} workgroups, ${workgroupSize} total threads`);
+          console.log(
+            `Dispatching compute shader with threshold: ${currentThreshold}, ${numWorkgroups} workgroups, ${workgroupSize} total threads`,
+          );
         }
+
+        // Update threshold buffer
+        const updateThresholdBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(updateThresholdBuffer.getMappedRange()).set([currentThreshold]);
+        updateThresholdBuffer.unmap();
+
+        // Update bind group with new threshold
+        let updatedBindGroup = miningGpu.device.createBindGroup({
+          layout: miningGpu.computePipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: userAddressBuffer } },
+            { binding: 1, resource: { buffer: factoryAddressBuffer } },
+            { binding: 2, resource: { buffer: bytecodeHashBuffer } },
+            { binding: 3, resource: { buffer: randomNonceBuffer } },
+            { binding: 4, resource: { buffer: updateThresholdBuffer } },
+            { binding: 5, resource: { buffer: resultsBuffer } },
+            { binding: 6, resource: { buffer: resultCountBuffer } },
+            { binding: 7, resource: { buffer: foundBetterBuffer } },
+          ],
+        });
 
         // Dispatch compute shader
         const commandEncoder = miningGpu.device.createCommandEncoder();
         const passEncoder = commandEncoder.beginComputePass();
         passEncoder.setPipeline(miningGpu.computePipeline);
-        passEncoder.setBindGroup(0, bindGroup);
+        passEncoder.setBindGroup(0, updatedBindGroup);
         passEncoder.dispatchWorkgroups(numWorkgroups);
         passEncoder.end();
 
         // Copy results back to CPU
-        const readBestScoreBuffer = miningGpu.device.createBuffer({
+        const readThresholdBuffer = miningGpu.device.createBuffer({
           size: 4,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-        commandEncoder.copyBufferToBuffer(bestScoreBuffer, 0, readBestScoreBuffer, 0, 4);
+        commandEncoder.copyBufferToBuffer(updateThresholdBuffer, 0, readThresholdBuffer, 0, 4);
 
         const readResultCountBuffer = miningGpu.device.createBuffer({
           size: 4,
@@ -342,6 +369,12 @@ export class CREATE2Miner {
         });
         commandEncoder.copyBufferToBuffer(resultsBuffer, 0, readResultsBuffer, 0, resultsBufferSize);
 
+        const readFoundBetterBuffer = miningGpu.device.createBuffer({
+          size: 4,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        commandEncoder.copyBufferToBuffer(foundBetterBuffer, 0, readFoundBetterBuffer, 0, 4);
+
         const commands = commandEncoder.finish();
         miningGpu.device.queue.submit([commands]);
 
@@ -349,16 +382,18 @@ export class CREATE2Miner {
           console.log("Commands submitted, waiting for GPU...");
         }
 
-        await readBestScoreBuffer.mapAsync(GPUMapMode.READ);
+        await readThresholdBuffer.mapAsync(GPUMapMode.READ);
         await readResultCountBuffer.mapAsync(GPUMapMode.READ);
         await readResultsBuffer.mapAsync(GPUMapMode.READ);
+        await readFoundBetterBuffer.mapAsync(GPUMapMode.READ);
 
-        const bestScore = new Uint32Array(readBestScoreBuffer.getMappedRange())[0];
+        const bestScore = new Uint32Array(readThresholdBuffer.getMappedRange())[0];
         const resultCount = new Uint32Array(readResultCountBuffer.getMappedRange())[0];
         const resultsData = new Uint32Array(readResultsBuffer.getMappedRange());
+        const foundBetter = new Uint32Array(readFoundBetterBuffer.getMappedRange())[0];
 
         if (debug) {
-          console.log(`GPU returned: bestScore=${bestScore}, resultCount=${resultCount}`);
+          console.log(`GPU returned: bestScore=${bestScore}, resultCount=${resultCount}, foundBetter=${foundBetter}`);
           if (resultCount > 0) {
             console.log(`First result data: [${Array.from(resultsData.slice(0, 9)).join(", ")}]`);
           }
@@ -400,34 +435,123 @@ export class CREATE2Miner {
           });
         }
 
-        // Update stats - all threads now process 1024 nonces each
-        const attemptsThisRound = workgroupSize * 1024;
+        // Update stats - with 8 threads per workgroup, each thread processes 1024 iterations
+        const attemptsThisRound = numWorkgroups * 8 * 1024;
+        totalIterations++;
         this.stats.totalAttempts += attemptsThisRound;
         this.stats.bestScore = Math.max(this.stats.bestScore, bestScore);
         this.stats.hashRate = (attemptsThisRound / (performance.now() - startTime)) * 1000;
+        this.stats.iterationsCompleted = totalIterations;
 
         // Add new results
         this.stats.results.push(...newResults);
         this.stats.results.sort((a, b) => b.score - a.score);
         this.stats.results = this.stats.results.slice(0, maxResults);
 
+        // Update threshold based on results
+        if (foundBetter && newResults.length > 0) {
+          // Found better results, increase threshold slightly to encourage finding even better results
+          const bestNewScore = Math.max(...newResults.map((r) => r.score));
+          // Only increase threshold if we found significantly better results
+          if (bestNewScore > currentThreshold + 1) {
+            currentThreshold = bestNewScore;
+          } else {
+            // If we found results at or near current threshold, keep threshold the same
+            // This allows us to collect more results at the same score level
+            currentThreshold = Math.max(currentThreshold, bestNewScore);
+          }
+          this.stats.currentThreshold = currentThreshold;
+
+          if (debug) {
+            console.log(`Found better results! New threshold: ${currentThreshold}`);
+          }
+        } else {
+          // No better results found, try a different approach
+          // Instead of increasing threshold, let's try with a slightly lower threshold
+          // to see if we can find more results at the current best score
+          if (this.stats.bestScore > 0) {
+            currentThreshold = Math.max(0, this.stats.bestScore - 1);
+          }
+          this.stats.currentThreshold = currentThreshold;
+
+          if (debug) {
+            console.log(`No better results found, trying with lower threshold: ${currentThreshold}`);
+          }
+        }
+
+        // Reset result buffers for next iteration
+        const resetResultCountBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(resetResultCountBuffer.getMappedRange()).set([0]);
+        resetResultCountBuffer.unmap();
+
+        const resetFoundBetterBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(resetFoundBetterBuffer.getMappedRange()).set([0]);
+        resetFoundBetterBuffer.unmap();
+
+        // Reset results buffer
+        const resetResultsBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: resultsBufferSize,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(resetResultsBuffer.getMappedRange()).fill(0);
+        resetResultsBuffer.unmap();
+
+        // Update the original buffers for next iteration
+        resultCountBuffer = resetResultCountBuffer;
+        foundBetterBuffer = resetFoundBetterBuffer;
+        resultsBuffer = resetResultsBuffer;
+
+        // Update threshold buffer for next iteration
+        const nextThresholdBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: 4,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(nextThresholdBuffer.getMappedRange()).set([currentThreshold]);
+        nextThresholdBuffer.unmap();
+
+        // Update bind group with new buffers for next iteration
+        const nextBindGroup = miningGpu.device.createBindGroup({
+          layout: miningGpu.computePipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: userAddressBuffer } },
+            { binding: 1, resource: { buffer: factoryAddressBuffer } },
+            { binding: 2, resource: { buffer: bytecodeHashBuffer } },
+            { binding: 3, resource: { buffer: randomNonceBuffer } },
+            { binding: 4, resource: { buffer: nextThresholdBuffer } },
+            { binding: 5, resource: { buffer: resultsBuffer } },
+            { binding: 6, resource: { buffer: resultCountBuffer } },
+            { binding: 7, resource: { buffer: foundBetterBuffer } },
+          ],
+        });
+
+        // Store the bind group for next iteration
+        updatedBindGroup = nextBindGroup;
+
         this.updateStats();
 
         if (debug) {
           console.log(
-            `Mining iteration: ${this.stats.totalAttempts} attempts (${attemptsThisRound} this round), best score: ${this.stats.bestScore}, ${newResults.length} new results, hashRate: ${this.stats.hashRate.toFixed(0)} H/s`,
+            `Mining iteration ${totalIterations}: ${this.stats.totalAttempts} attempts (${attemptsThisRound} this round), best score: ${this.stats.bestScore}, threshold: ${currentThreshold}, ${newResults.length} new results, hashRate: ${this.stats.hashRate.toFixed(0)} H/s`,
           );
         }
 
-        readBestScoreBuffer.unmap();
+        readThresholdBuffer.unmap();
         readResultCountBuffer.unmap();
         readResultsBuffer.unmap();
+        readFoundBetterBuffer.unmap();
 
-        // Break after first iteration for debugging
-        // if (debug && this.stats.totalAttempts >= attemptsThisRound) {
-        //   console.log("Breaking after first iteration for debugging");
-        //   break;
-        // }
+        // Small delay to prevent overwhelming the GPU
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
 
       return this.stats.results;

@@ -211,7 +211,7 @@ var<storage, read> bytecode_hash: array<u32, 8>; // 32 bytes = 8 words
 var<storage, read> random_nonce: u32; // 4 bytes random from TypeScript
 
 @group(0) @binding(4)
-var<storage, read_write> best_score: u32; // Current best score
+var<storage, read_write> score_threshold: u32; // Single threshold for early exit and best score tracking
 
 @group(0) @binding(5)
 var<storage, read_write> results: array<u32>; // Results buffer: [score, salt_word0, salt_word1, ..., salt_word7]
@@ -219,7 +219,10 @@ var<storage, read_write> results: array<u32>; // Results buffer: [score, salt_wo
 @group(0) @binding(6)
 var<storage, read_write> result_count: u32; // Number of results found
 
-@compute @workgroup_size(256)
+@group(0) @binding(7)
+var<storage, read_write> found_better: u32; // Flag to indicate we found a better result
+
+@compute @workgroup_size(8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let thread_id = global_id.x;
     
@@ -252,6 +255,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     var best_local_score: u32 = 0u;
     var best_local_salt: array<u32, 8>;
+    var found_better_local: bool = false;
     
     // Loop through different counters per thread
     for (var loop_counter: u32 = 0u; loop_counter < 1024u; loop_counter = loop_counter + 1u) {
@@ -273,28 +277,37 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             for (var i: u32 = 0; i < 8u; i = i + 1u) {
                 best_local_salt[i] = salt[i];
             }
+            
+            // Check if this score is better than our threshold
+            if (score > score_threshold) {
+                found_better_local = true;
+            }
         }
     }
     
-    // After processing all iterations, store result if we found something good
-    if (best_local_score > 0u) {
-        // Simple approach: let each thread try to store its result
-        // This will cause race conditions but at least we'll get some results
-        if (best_local_score > best_score) {
-            best_score = best_local_score;
-            
-            // Store in results array - use thread_id as index to avoid some collisions
-            let result_slot = thread_id % 10u; // Limit to first 10 slots
-            let base_idx = result_slot * 9u;
-            
-            results[base_idx] = best_local_score;
-            for (var i: u32 = 0; i < 8u; i = i + 1u) {
-                results[base_idx + 1u + i] = best_local_salt[i];
-            }
-            
-            // Update result count (this will have race conditions but should give us a rough count)
-            result_count = result_count + 1u;
+    // Store result if we found something good (score > 0)
+    if (best_local_score > 0u && found_better_local) {
+        // Update global threshold if we found a better score
+        if (best_local_score > score_threshold) {
+            score_threshold = best_local_score;
         }
+        
+        // Store in results array - use atomic operations to avoid collisions
+        // Each thread tries to store its result in a different slot
+        let result_slot = thread_id % 20u; // Use more slots to reduce collisions
+        let base_idx = result_slot * 9u;
+        
+        // Store the result
+        results[base_idx] = best_local_score;
+        for (var i: u32 = 0; i < 8u; i = i + 1u) {
+            results[base_idx + 1u + i] = best_local_salt[i];
+        }
+        
+        // Update result count (this will have some race conditions but should work)
+        result_count = result_count + 1u;
+        
+        // Set flag if we found something better than threshold
+        found_better = 1u;
     }
 } // End of main function
 `;
