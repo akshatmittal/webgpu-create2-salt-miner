@@ -311,7 +311,7 @@ export class CREATE2Miner {
       // Mine until we reach the target or user stops
       while (this.isRunning && this.stats.bestScore < targetZeros * 2) {
         const startTime = performance.now();
-        const numWorkgroups = Math.ceil(workgroupSize / 8); // 8 threads per workgroup (matching shader)
+        const numWorkgroups = Math.ceil(workgroupSize / 8); // 8 threads per workgroup
 
         if (debug) {
           console.log(

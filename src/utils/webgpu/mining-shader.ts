@@ -222,6 +222,7 @@ var<storage, read_write> result_count: u32; // Number of results found
 @group(0) @binding(7)
 var<storage, read_write> found_better: u32; // Flag to indicate we found a better result
 
+// Can bump workgroup size, but I've had my own issues with it.
 @compute @workgroup_size(8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let thread_id = global_id.x;

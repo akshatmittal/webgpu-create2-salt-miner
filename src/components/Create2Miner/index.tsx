@@ -11,9 +11,9 @@ export function Create2Miner() {
     userAddress: "0x0000000000000000000000000000000000000000",
     factoryAddress: "0x0000000000000000000000000000000000000000",
     bytecodeHash: "0x1111111111111111111111111111111111111111111111111111111111111111",
-    targetZeros: 2,
+    targetZeros: 6,
     maxResults: 10,
-    workgroupSize: 4096,
+    workgroupSize: 1024,
   });
 
   const [stats, setStats] = useState<MiningStats>({
