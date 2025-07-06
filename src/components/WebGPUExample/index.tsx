@@ -1,9 +1,10 @@
 "use client";
 
-import { gpu_reinit } from "@/utils/webgpu";
-import { testGPUvsViem } from "@/utils/webgpu/viem-reference";
-import { validateGPUImplementation } from "@/utils/webgpu/validation-test";
 import { useEffect } from "react";
+
+import { gpu_reinit } from "@/utils/webgpu";
+import { validateGPUImplementation } from "@/utils/webgpu/validation-test";
+import { testGPUvsViem } from "@/utils/webgpu/viem-reference";
 
 async function playground() {
   console.log("=== WebGPU CREATE2 Mining Test Suite ===");
@@ -12,7 +13,7 @@ async function playground() {
     // Test GPU vs Viem CREATE2 validation
     console.log("\n--- Testing GPU vs Viem CREATE2 Validation ---");
     await gpu_reinit();
-    const gpuViemPassed = await testGPUvsViem();
+    await testGPUvsViem();
 
     // Final CREATE2 validation test
     console.log("\n--- Final CREATE2 GPU Validation ---");

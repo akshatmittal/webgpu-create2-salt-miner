@@ -1,5 +1,6 @@
-import { CREATE2Miner, MiningParams } from "./mining";
 import { getContractAddress } from "viem";
+
+import { CREATE2Miner, MiningParams } from "./mining";
 
 // Add debug function to test specific salt values
 export async function debugCreate2Calculation() {

@@ -1,4 +1,5 @@
 import { getContractAddress } from "viem";
+
 import { keccak256_gpu } from "./index";
 import { CREATE2_TEST_CASES, constructCreate2Input } from "./test-cases";
 

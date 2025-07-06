@@ -5,7 +5,7 @@ export function arrayify(hexString: string): Uint8Array {
     throw new Error("Invalid hex string");
   }
 
-  let bytes = new Uint8Array(hexString.length / 2);
+  const bytes = new Uint8Array(hexString.length / 2);
 
   for (let i = 0; i < hexString.length; i += 2) {
     bytes[i / 2] = parseInt(hexString.substr(i, 2), 16);
@@ -14,7 +14,7 @@ export function arrayify(hexString: string): Uint8Array {
   return bytes;
 }
 
-export function isBytesLike(value: any): value is BytesLike {
+export function isBytesLike(value: unknown): value is BytesLike {
   return (
     typeof value === "string" ||
     (Array.isArray(value) && value.every((v) => typeof v === "number")) ||

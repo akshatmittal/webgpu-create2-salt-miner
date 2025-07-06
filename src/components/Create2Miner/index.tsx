@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { CREATE2Miner, MiningParams, MiningStats } from "@/utils/webgpu/mining";
-import { testMiningSystem } from "@/utils/webgpu/mining-test";
+
 import Link from "next/link";
+
+import { CREATE2Miner, MiningParams, MiningStats } from "@/utils/webgpu/mining";
 
 export function Create2Miner() {
   const [miningParams, setMiningParams] = useState<MiningParams>({
@@ -254,6 +255,10 @@ export function Create2Miner() {
                 <div className="text-sm text-gray-600">Results Found</div>
                 <div className="text-2xl font-bold text-gray-800">{stats.results.length}</div>
               </div>
+            </div>
+
+            <div className="rounded-lg bg-green-50 p-4">
+              <p className="text-sm">This is experimental software. Please see GitHub for details.</p>
             </div>
 
             <div className="flex gap-2 rounded-lg bg-green-50 p-4">

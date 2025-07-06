@@ -1,5 +1,6 @@
-import { getMiningShader } from "./mining-shader";
 import { getContractAddress } from "viem";
+
+import { getMiningShader } from "./mining-shader";
 
 const debug = true;
 

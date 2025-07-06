@@ -1,5 +1,6 @@
-import { keccak256_gpu, gpu_reinit } from "./index";
 import { getContractAddress } from "viem";
+
+import { keccak256_gpu, gpu_reinit } from "./index";
 import { CREATE2_TEST_CASES, constructCreate2Input } from "./test-cases";
 
 export async function validateGPUImplementation() {

@@ -1,5 +1,5 @@
-import { arrayify, BytesLike } from "./utils";
 import { getShader } from "./shader";
+import { arrayify } from "./utils";
 
 const debug = false;
 
@@ -263,7 +263,7 @@ export async function keccak256_gpu_batch(messages: Uint8Array[]) {
 export async function keccak256_gpu(data: string) {
   const hashes = await keccak256_gpu_batch([arrayify(data)]);
 
-  return "0x" + hashes.subarray(0, 32).reduce((a: any, b: any) => a + b.toString(16).padStart(2, "0"), "");
+  return "0x" + hashes.subarray(0, 32).reduce((a: string, b: number) => a + b.toString(16).padStart(2, "0"), "");
 }
 
 // Aliases for convenience
