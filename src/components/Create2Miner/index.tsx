@@ -257,6 +257,26 @@ export function Create2Miner() {
               </div>
             </div>
 
+            {/* Performance Metrics */}
+            {stats.isRunning && (
+              <div className="grid grid-cols-3 gap-4">
+                <div className="rounded-lg bg-blue-50 p-4">
+                  <div className="text-sm text-blue-600">GPU Time</div>
+                  <div className="text-lg font-bold text-blue-800">{stats.gpuTime.toFixed(1)}ms</div>
+                </div>
+
+                <div className="rounded-lg bg-green-50 p-4">
+                  <div className="text-sm text-green-600">CPU Time</div>
+                  <div className="text-lg font-bold text-green-800">{stats.cpuTime.toFixed(1)}ms</div>
+                </div>
+
+                <div className="rounded-lg bg-purple-50 p-4">
+                  <div className="text-sm text-purple-600">Buffer Alloc</div>
+                  <div className="text-lg font-bold text-purple-800">{stats.bufferAllocationTime.toFixed(1)}ms</div>
+                </div>
+              </div>
+            )}
+
             <div className="rounded-lg bg-green-50 p-4">
               <p className="text-sm">This is experimental software. Please see GitHub for details.</p>
             </div>

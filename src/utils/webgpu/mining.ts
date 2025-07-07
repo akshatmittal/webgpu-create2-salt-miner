@@ -11,6 +11,16 @@ async function getGPUDevice(): Promise<GPUDevice> {
   if (!adapter) {
     throw "No adapter";
   } else {
+    // Get device limits for optimal workgroup sizing
+    const limits = adapter.limits;
+    console.log("GPU Device Limits:", {
+      maxComputeWorkgroupSizeX: limits.maxComputeWorkgroupSizeX,
+      maxComputeWorkgroupSizeY: limits.maxComputeWorkgroupSizeY,
+      maxComputeWorkgroupSizeZ: limits.maxComputeWorkgroupSizeZ,
+      maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension,
+      maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,
+    });
+    
     return await adapter.requestDevice({
       requiredLimits: {
         maxStorageBuffersPerShaderStage: 10,
@@ -123,11 +133,16 @@ export interface MiningStats {
   isRunning: boolean;
   currentThreshold: number; // Track current threshold
   iterationsCompleted: number; // Track completed iterations
+  gpuTime: number; // Track GPU execution time
+  cpuTime: number; // Track CPU processing time
+  bufferAllocationTime: number; // Track buffer allocation overhead
 }
 
 class MiningGPU {
   #device: GPUDevice | null = null;
   #computePipeline: GPUComputePipeline | null = null;
+  #bufferPool: Map<string, GPUBuffer[]> = new Map();
+  #maxPoolSize = 5; // Keep up to 5 buffers of each type
 
   async init() {
     this.#device = await getGPUDevice();
@@ -155,6 +170,58 @@ class MiningGPU {
     }
     return this.#computePipeline;
   }
+
+  // Buffer pooling for better performance
+  private getBufferFromPool(size: number, usage: GPUBufferUsageFlags): GPUBuffer {
+    const key = `${size}-${usage}`;
+    const pool = this.#bufferPool.get(key) || [];
+    
+    if (pool.length > 0) {
+      const buffer = pool.pop()!;
+      // Reset buffer content to zeros
+      const resetBuffer = this.device.createBuffer({
+        mappedAtCreation: true,
+        size,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      new Uint8Array(resetBuffer.getMappedRange()).fill(0);
+      resetBuffer.unmap();
+      
+      const commandEncoder = this.device.createCommandEncoder();
+      commandEncoder.copyBufferToBuffer(resetBuffer, 0, buffer, 0, size);
+      this.device.queue.submit([commandEncoder.finish()]);
+      resetBuffer.destroy();
+      
+      return buffer;
+    }
+    
+    return this.device.createBuffer({
+      size,
+      usage,
+    });
+  }
+
+  private returnBufferToPool(buffer: GPUBuffer, size: number, usage: GPUBufferUsageFlags) {
+    const key = `${size}-${usage}`;
+    const pool = this.#bufferPool.get(key) || [];
+    
+    if (pool.length < this.#maxPoolSize) {
+      pool.push(buffer);
+      this.#bufferPool.set(key, pool);
+    } else {
+      buffer.destroy();
+    }
+  }
+
+  // Clean up buffer pool
+  destroy() {
+    for (const pool of this.#bufferPool.values()) {
+      for (const buffer of pool) {
+        buffer.destroy();
+      }
+    }
+    this.#bufferPool.clear();
+  }
 }
 
 let miningGpu: MiningGPU;
@@ -169,6 +236,9 @@ export class CREATE2Miner {
     isRunning: false,
     currentThreshold: 0,
     iterationsCompleted: 0,
+    gpuTime: 0,
+    cpuTime: 0,
+    bufferAllocationTime: 0,
   };
   private onStatsUpdate?: (stats: MiningStats) => void;
 
@@ -244,7 +314,7 @@ export class CREATE2Miner {
         console.log(`Generated random nonce: ${randomNonce[0]}`);
       }
 
-      // Create GPU buffers
+      // Create static GPU buffers (these don't change during mining)
       const userAddressBuffer = miningGpu.device.createBuffer({
         mappedAtCreation: true,
         size: userAddressArray.byteLength,
@@ -278,40 +348,20 @@ export class CREATE2Miner {
       randomNonceBuffer.unmap();
 
       // Results buffer size: 9 words per result (1 score + 8 salt words)
-      // Increased to 20 slots to match shader changes
       const resultsBufferSize = Math.max(maxResults, 20) * 9 * 4;
-      let resultsBuffer = miningGpu.device.createBuffer({
-        mappedAtCreation: true,
-        size: resultsBufferSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-      });
-      // Initialize with zeros
-      new Uint32Array(resultsBuffer.getMappedRange()).fill(0);
-      resultsBuffer.unmap();
-
-      let resultCountBuffer = miningGpu.device.createBuffer({
-        mappedAtCreation: true,
-        size: 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-      });
-      new Uint32Array(resultCountBuffer.getMappedRange()).set([0]);
-      resultCountBuffer.unmap();
-
-      let foundBetterBuffer = miningGpu.device.createBuffer({
-        mappedAtCreation: true,
-        size: 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-      });
-      new Uint32Array(foundBetterBuffer.getMappedRange()).set([0]);
-      foundBetterBuffer.unmap();
+      
+      // Pre-allocate reusable buffers from pool
+      const thresholdBufferSize = 4;
+      const resultCountBufferSize = 4;
+      const foundBetterBufferSize = 4;
 
       let currentThreshold = minScoreThreshold;
       let totalIterations = 0;
 
       // Mine until we reach the target or user stops
       while (this.isRunning && this.stats.bestScore < targetZeros * 2) {
-        const startTime = performance.now();
-        const numWorkgroups = Math.ceil(workgroupSize / 8); // 8 threads per workgroup
+        const iterationStartTime = performance.now();
+        const numWorkgroups = Math.ceil(workgroupSize / 64); // 64 threads per workgroup (updated)
 
         if (debug) {
           console.log(
@@ -319,24 +369,71 @@ export class CREATE2Miner {
           );
         }
 
-        // Update threshold buffer
-        const updateThresholdBuffer = miningGpu.device.createBuffer({
-          mappedAtCreation: true,
-          size: 4,
-          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-        });
-        new Uint32Array(updateThresholdBuffer.getMappedRange()).set([currentThreshold]);
-        updateThresholdBuffer.unmap();
+        // Get buffers from pool
+        const bufferAllocationStart = performance.now();
+        const thresholdBuffer = miningGpu.getBufferFromPool(thresholdBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        const resultsBuffer = miningGpu.getBufferFromPool(resultsBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        const resultCountBuffer = miningGpu.getBufferFromPool(resultCountBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        const foundBetterBuffer = miningGpu.getBufferFromPool(foundBetterBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        const bufferAllocationTime = performance.now() - bufferAllocationStart;
 
-        // Update bind group with new threshold
-        let updatedBindGroup = miningGpu.device.createBindGroup({
+        // Initialize buffers with current values
+        const initThresholdBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: thresholdBufferSize,
+          usage: GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(initThresholdBuffer.getMappedRange()).set([currentThreshold, 0, 0, 0]);
+        initThresholdBuffer.unmap();
+
+        const initResultCountBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: resultCountBufferSize,
+          usage: GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(initResultCountBuffer.getMappedRange()).set([0]);
+        initResultCountBuffer.unmap();
+
+        const initFoundBetterBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: foundBetterBufferSize,
+          usage: GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(initFoundBetterBuffer.getMappedRange()).set([0]);
+        initFoundBetterBuffer.unmap();
+
+        // Initialize results buffer with zeros
+        const initResultsBuffer = miningGpu.device.createBuffer({
+          mappedAtCreation: true,
+          size: resultsBufferSize,
+          usage: GPUBufferUsage.COPY_SRC,
+        });
+        new Uint32Array(initResultsBuffer.getMappedRange()).fill(0);
+        initResultsBuffer.unmap();
+
+        // Copy initial values to working buffers
+        const initCommandEncoder = miningGpu.device.createCommandEncoder();
+        initCommandEncoder.copyBufferToBuffer(initThresholdBuffer, 0, thresholdBuffer, 0, thresholdBufferSize);
+        initCommandEncoder.copyBufferToBuffer(initResultCountBuffer, 0, resultCountBuffer, 0, resultCountBufferSize);
+        initCommandEncoder.copyBufferToBuffer(initFoundBetterBuffer, 0, foundBetterBuffer, 0, foundBetterBufferSize);
+        initCommandEncoder.copyBufferToBuffer(initResultsBuffer, 0, resultsBuffer, 0, resultsBufferSize);
+        miningGpu.device.queue.submit([initCommandEncoder.finish()]);
+
+        // Clean up init buffers
+        initThresholdBuffer.destroy();
+        initResultCountBuffer.destroy();
+        initFoundBetterBuffer.destroy();
+        initResultsBuffer.destroy();
+
+        // Create bind group with current buffers
+        const bindGroup = miningGpu.device.createBindGroup({
           layout: miningGpu.computePipeline.getBindGroupLayout(0),
           entries: [
             { binding: 0, resource: { buffer: userAddressBuffer } },
             { binding: 1, resource: { buffer: factoryAddressBuffer } },
             { binding: 2, resource: { buffer: bytecodeHashBuffer } },
             { binding: 3, resource: { buffer: randomNonceBuffer } },
-            { binding: 4, resource: { buffer: updateThresholdBuffer } },
+            { binding: 4, resource: { buffer: thresholdBuffer } },
             { binding: 5, resource: { buffer: resultsBuffer } },
             { binding: 6, resource: { buffer: resultCountBuffer } },
             { binding: 7, resource: { buffer: foundBetterBuffer } },
@@ -347,36 +444,36 @@ export class CREATE2Miner {
         const commandEncoder = miningGpu.device.createCommandEncoder();
         const passEncoder = commandEncoder.beginComputePass();
         passEncoder.setPipeline(miningGpu.computePipeline);
-        passEncoder.setBindGroup(0, updatedBindGroup);
+        passEncoder.setBindGroup(0, bindGroup);
         passEncoder.dispatchWorkgroups(numWorkgroups);
         passEncoder.end();
 
-        // Copy results back to CPU
+        // Create readback buffers
         const readThresholdBuffer = miningGpu.device.createBuffer({
-          size: 4,
+          size: thresholdBufferSize,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-        commandEncoder.copyBufferToBuffer(updateThresholdBuffer, 0, readThresholdBuffer, 0, 4);
-
         const readResultCountBuffer = miningGpu.device.createBuffer({
-          size: 4,
+          size: resultCountBufferSize,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-        commandEncoder.copyBufferToBuffer(resultCountBuffer, 0, readResultCountBuffer, 0, 4);
-
         const readResultsBuffer = miningGpu.device.createBuffer({
           size: resultsBufferSize,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-        commandEncoder.copyBufferToBuffer(resultsBuffer, 0, readResultsBuffer, 0, resultsBufferSize);
-
         const readFoundBetterBuffer = miningGpu.device.createBuffer({
-          size: 4,
+          size: foundBetterBufferSize,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-        commandEncoder.copyBufferToBuffer(foundBetterBuffer, 0, readFoundBetterBuffer, 0, 4);
+
+        // Copy results back to CPU
+        commandEncoder.copyBufferToBuffer(thresholdBuffer, 0, readThresholdBuffer, 0, thresholdBufferSize);
+        commandEncoder.copyBufferToBuffer(resultCountBuffer, 0, readResultCountBuffer, 0, resultCountBufferSize);
+        commandEncoder.copyBufferToBuffer(resultsBuffer, 0, readResultsBuffer, 0, resultsBufferSize);
+        commandEncoder.copyBufferToBuffer(foundBetterBuffer, 0, readFoundBetterBuffer, 0, foundBetterBufferSize);
 
         const commands = commandEncoder.finish();
+        const gpuStartTime = performance.now();
         miningGpu.device.queue.submit([commands]);
 
         if (debug) {
@@ -387,6 +484,9 @@ export class CREATE2Miner {
         await readResultCountBuffer.mapAsync(GPUMapMode.READ);
         await readResultsBuffer.mapAsync(GPUMapMode.READ);
         await readFoundBetterBuffer.mapAsync(GPUMapMode.READ);
+
+        const gpuTime = performance.now() - gpuStartTime;
+        const cpuStartTime = performance.now();
 
         const bestScore = new Uint32Array(readThresholdBuffer.getMappedRange())[0];
         const resultCount = new Uint32Array(readResultCountBuffer.getMappedRange())[0];
@@ -436,13 +536,19 @@ export class CREATE2Miner {
           });
         }
 
-        // Update stats - with 8 threads per workgroup, each thread processes 1024 iterations
-        const attemptsThisRound = numWorkgroups * 8 * 1024;
+        // Update stats - with 64 threads per workgroup, each thread processes 2048 iterations
+        const attemptsThisRound = numWorkgroups * 64 * 2048;
+        const totalTime = performance.now() - iterationStartTime;
+        const cpuTime = performance.now() - cpuStartTime;
+        
         totalIterations++;
         this.stats.totalAttempts += attemptsThisRound;
         this.stats.bestScore = Math.max(this.stats.bestScore, bestScore);
-        this.stats.hashRate = (attemptsThisRound / (performance.now() - startTime)) * 1000;
+        this.stats.hashRate = (attemptsThisRound / totalTime) * 1000;
         this.stats.iterationsCompleted = totalIterations;
+        this.stats.gpuTime = gpuTime;
+        this.stats.cpuTime = cpuTime;
+        this.stats.bufferAllocationTime = bufferAllocationTime;
 
         // Add new results
         this.stats.results.push(...newResults);
@@ -551,8 +657,20 @@ export class CREATE2Miner {
         readResultsBuffer.unmap();
         readFoundBetterBuffer.unmap();
 
+        // Return buffers to pool for reuse
+        miningGpu.returnBufferToPool(thresholdBuffer, thresholdBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        miningGpu.returnBufferToPool(resultsBuffer, resultsBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        miningGpu.returnBufferToPool(resultCountBuffer, resultCountBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+        miningGpu.returnBufferToPool(foundBetterBuffer, foundBetterBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+
+        // Clean up readback buffers
+        readThresholdBuffer.destroy();
+        readResultCountBuffer.destroy();
+        readResultsBuffer.destroy();
+        readFoundBetterBuffer.destroy();
+
         // Small delay to prevent overwhelming the GPU
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((resolve) => setTimeout(resolve, 5)); // Reduced delay
       }
 
       return this.stats.results;
@@ -565,6 +683,11 @@ export class CREATE2Miner {
   stop() {
     this.isRunning = false;
     this.updateStats();
+    
+    // Clean up buffer pool when stopping
+    if (miningGpu) {
+      miningGpu.destroy();
+    }
   }
 
   getStats(): MiningStats {
