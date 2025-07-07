@@ -221,8 +221,8 @@ var<storage, read_write> result_count: u32; // Number of results found
 @group(0) @binding(7)
 var<storage, read_write> found_better: u32; // Flag to indicate we found a better result
 
-// Can bump workgroup size, but I've had my own issues with it.
-@compute @workgroup_size(8)
+// Optimized workgroup size for better GPU utilization
+@compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let thread_id = global_id.x;
     
@@ -230,10 +230,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // user_address (20 bytes) + random_from_ts (4 bytes) + thread_id (4 bytes) + loop_counter (4 bytes)
     var salt: array<u32, 8>; // 32 bytes = 8 words
     
-    // Copy user address (20 bytes = 5 words)
-    for (var i: u32 = 0; i < 5u; i = i + 1u) {
-        salt[i] = user_address[i];
-    }
+    // Copy user address (20 bytes = 5 words) - unrolled for better performance
+    salt[0] = user_address[0];
+    salt[1] = user_address[1];
+    salt[2] = user_address[2];
+    salt[3] = user_address[3];
+    salt[4] = user_address[4];
     
     // Set random nonce from TypeScript (4 bytes)
     salt[5] = random_nonce;
@@ -241,24 +243,31 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Set unique thread ID (4 bytes) 
     salt[6] = thread_id;
     
-    // Pre-construct factory address and bytecode hash for efficiency
+    // Pre-construct factory address and bytecode hash for efficiency - unrolled
     var factory_addr: array<u32, 5>;
     var bytecode_hash_local: array<u32, 8>;
     
-    for (var i: u32 = 0; i < 5u; i = i + 1u) {
-        factory_addr[i] = factory_address[i];
-    }
+    factory_addr[0] = factory_address[0];
+    factory_addr[1] = factory_address[1];
+    factory_addr[2] = factory_address[2];
+    factory_addr[3] = factory_address[3];
+    factory_addr[4] = factory_address[4];
     
-    for (var i: u32 = 0; i < 8u; i = i + 1u) {
-        bytecode_hash_local[i] = bytecode_hash[i];
-    }
+    bytecode_hash_local[0] = bytecode_hash[0];
+    bytecode_hash_local[1] = bytecode_hash[1];
+    bytecode_hash_local[2] = bytecode_hash[2];
+    bytecode_hash_local[3] = bytecode_hash[3];
+    bytecode_hash_local[4] = bytecode_hash[4];
+    bytecode_hash_local[5] = bytecode_hash[5];
+    bytecode_hash_local[6] = bytecode_hash[6];
+    bytecode_hash_local[7] = bytecode_hash[7];
     
     var best_local_score: u32 = 0u;
     var best_local_salt: array<u32, 8>;
     var found_better_local: bool = false;
     
-    // Loop through different counters per thread
-    for (var loop_counter: u32 = 0u; loop_counter < 1024u; loop_counter = loop_counter + 1u) {
+    // Increased loop count for better GPU utilization
+    for (var loop_counter: u32 = 0u; loop_counter < 2048u; loop_counter = loop_counter + 1u) {
         // Set unique loop counter (4 bytes)
         salt[7] = loop_counter;
     
@@ -274,9 +283,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Keep track of best score for this thread
         if (score > best_local_score) {
             best_local_score = score;
-            for (var i: u32 = 0; i < 8u; i = i + 1u) {
-                best_local_salt[i] = salt[i];
-            }
+            // Unrolled copy for better performance
+            best_local_salt[0] = salt[0];
+            best_local_salt[1] = salt[1];
+            best_local_salt[2] = salt[2];
+            best_local_salt[3] = salt[3];
+            best_local_salt[4] = salt[4];
+            best_local_salt[5] = salt[5];
+            best_local_salt[6] = salt[6];
+            best_local_salt[7] = salt[7];
             
             // Check if this score is better than our threshold
             if (score > score_threshold) {
@@ -297,11 +312,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let result_slot = thread_id % 20u; // Use more slots to reduce collisions
         let base_idx = result_slot * 9u;
         
-        // Store the result
+        // Store the result - unrolled for better performance
         results[base_idx] = best_local_score;
-        for (var i: u32 = 0; i < 8u; i = i + 1u) {
-            results[base_idx + 1u + i] = best_local_salt[i];
-        }
+        results[base_idx + 1u] = best_local_salt[0];
+        results[base_idx + 2u] = best_local_salt[1];
+        results[base_idx + 3u] = best_local_salt[2];
+        results[base_idx + 4u] = best_local_salt[3];
+        results[base_idx + 5u] = best_local_salt[4];
+        results[base_idx + 6u] = best_local_salt[5];
+        results[base_idx + 7u] = best_local_salt[6];
+        results[base_idx + 8u] = best_local_salt[7];
         
         // Update result count (this will have some race conditions but should work)
         result_count = result_count + 1u;
